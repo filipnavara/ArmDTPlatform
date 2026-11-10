@@ -136,6 +136,9 @@ clock_sec_t rtcCounter (bool wait, clock_nsec_t *nsecs)
 }
 }
 
+// The statistics counters wrap by design and the offsets are checked explicitly: no sanitizer runtime calls (the
+// RELEASE fileset reference kernel of iOS 27 has no sanitizer runtime).
+__attribute__((no_sanitize("integer")))
 void ArmDTPlatform::getUTCTimeOfDay (clock_sec_t *secs, clock_nsec_t *nsecs)
 {
   *secs = 0;
@@ -149,7 +152,10 @@ void ArmDTPlatform::getUTCTimeOfDay (clock_sec_t *secs, clock_nsec_t *nsecs)
   int64_t wall = (int64_t)counter;
   if (gRTCReadOnly && gRTCLock != nullptr) {
     IOLockLock (gRTCLock);
-    wall += gRTCOffset;
+    // Explicit overflow checks (no sanitizer runtime call: the RELEASE fileset reference kernel has none).
+    if (__builtin_add_overflow (wall, gRTCOffset, &wall)) {
+      wall = 0;
+    }
     IOLockUnlock (gRTCLock);
   }
   if (wall > 0) {
@@ -158,6 +164,9 @@ void ArmDTPlatform::getUTCTimeOfDay (clock_sec_t *secs, clock_nsec_t *nsecs)
   }
 }
 
+// The statistics counters wrap by design and the offsets are checked explicitly: no sanitizer runtime calls (the
+// RELEASE fileset reference kernel of iOS 27 has no sanitizer runtime).
+__attribute__((no_sanitize("integer")))
 void ArmDTPlatform::setUTCTimeOfDay (clock_sec_t secs, clock_nsec_t nsecs)
 {
   IORTC *rtc = rtcService (false);
@@ -175,10 +184,13 @@ void ArmDTPlatform::setUTCTimeOfDay (clock_sec_t secs, clock_nsec_t nsecs)
   // One-second resolution, as the counter has. A set within a second of the
   // current offset (the restore below sets the calendar from it) changes
   // nothing and writes nothing.
-  int64_t offset = (int64_t)secs - (int64_t)counter;
+  int64_t offset;
+  if (__builtin_sub_overflow ((int64_t)secs, (int64_t)counter, &offset)) {
+    return;
+  }
   IOLockLock (gRTCLock);
-  int64_t delta = offset - gRTCOffset;
-  bool changed = delta > 1 || delta < -1;
+  int64_t delta;
+  bool changed = __builtin_sub_overflow (offset, gRTCOffset, &delta) || delta > 1 || delta < -1;
   if (changed) {
     gRTCOffset = offset;
   }
@@ -209,10 +221,11 @@ extern "C" int armdt_rtc_restore (int found, int64_t offset, clock_sec_t *wall)
   gRTCOffsetRestored = true;
   IOLockUnlock (gRTCLock);
   armdt_platform_rtc_stats[2] = armdt_platform_rtc_stats[2] + 1;
-  if (!apply || (int64_t)counter + offset <= 0) {
+  int64_t restored;
+  if (!apply || __builtin_add_overflow ((int64_t)counter, offset, &restored) || restored <= 0) {
     return 0;
   }
-  *wall = (clock_sec_t)((int64_t)counter + offset);
+  *wall = (clock_sec_t)restored;
   return 1;
 }
 
@@ -364,7 +377,7 @@ bool ArmDTPlatform::configure (IOService *provider)
     return false;
   }
   unsigned platformStage = 0;
-  PE_parse_boot_argn ("sheng-platform-stage", &platformStage, sizeof (platformStage));
+  PE_parse_boot_argn ("platform-stage", &platformStage, sizeof (platformStage));
   if (platformStage == 1) {
     platformStageReset ();
   }
@@ -424,7 +437,7 @@ bool ArmDTPlatform::configure (IOService *provider)
   // configuration and panic before publishing the service. The payload's
   // panic-screen probe makes this observable without a serial console.
   unsigned platformProbe = 0;
-  PE_parse_boot_argn ("sheng-platform-panic", &platformProbe, sizeof (platformProbe));
+  PE_parse_boot_argn ("platform-panic", &platformProbe, sizeof (platformProbe));
   if (platformProbe != 0 || platformStage == 4) {
     platformStageReset ();
   }
